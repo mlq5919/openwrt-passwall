@@ -3,7 +3,7 @@ local api = require "luci.passwall.api"
 local uci = api.uci
 local sys = api.sys
 local jsonc = api.jsonc
-local appname = api.appname
+local appname = "passwall"
 local fs = api.fs
 
 local new_port
@@ -754,6 +754,8 @@ function gen_config(var)
 	local dns_listen_port = var["-dns_listen_port"]
 	local direct_dns_port = var["-direct_dns_port"]
 	local direct_dns_udp_server = var["-direct_dns_udp_server"]
+	local direct_dns_tcp_server = var["-direct_dns_tcp_server"]
+	local direct_dns_dot_server = var["-direct_dns_dot_server"]
 	local direct_dns_query_strategy = var["-direct_dns_query_strategy"]
 	local remote_dns_port = var["-remote_dns_port"]
 	local remote_dns_udp_server = var["-remote_dns_udp_server"]
@@ -930,22 +932,23 @@ function gen_config(var)
 			local preproxy_node_id = node["main_node"]
 			local preproxy_node = preproxy_enabled and preproxy_node_id and uci:get_all(appname, preproxy_node_id) or nil
 
-			if not preproxy_node and preproxy_node_id and api.parseURL(preproxy_node_id) then
-				local parsed1 = api.parseURL(preproxy_node_id)
-				local _node = {
-					type = "sing-box",
-					protocol = parsed1.protocol,
-					username = parsed1.username,
-					password = parsed1.password,
-					address = parsed1.host,
-					port = parsed1.port,
-					uot = "1",
-				}
-				local preproxy_outbound = gen_outbound(flag, _node, preproxy_tag)
-				if preproxy_outbound then
-					table.insert(outbounds, preproxy_outbound)
-				else
-					preproxy_enabled = false
+			if preproxy_node_id and preproxy_node_id:find("Socks_") then
+				local socks_id = preproxy_node_id:sub(1 + #"Socks_")
+				local socks_node = uci:get_all(appname, socks_id) or nil
+				if socks_node then
+					local _node = {
+						type = "sing-box",
+						protocol = "socks",
+						address = "127.0.0.1",
+						port = socks_node.port,
+						uot = "1",
+					}
+					local preproxy_outbound = gen_outbound(flag, _node, preproxy_tag)
+					if preproxy_outbound then
+						table.insert(outbounds, preproxy_outbound)
+					else
+						preproxy_enabled = false
+					end
 				end
 			elseif preproxy_node and api.is_normal_node(preproxy_node) then
 				local preproxy_outbound = gen_outbound(flag, preproxy_node, preproxy_tag)
@@ -967,21 +970,22 @@ function gen_config(var)
 					rule_outboundTag = "block"
 				elseif _node_id == "_default" and rule_name ~= "default" then
 					rule_outboundTag = "default"
-				elseif api.parseURL(_node_id) then
-					local parsed1 = api.parseURL(_node_id)
-					local _node = {
-						type = "sing-box",
-						protocol = parsed1.protocol,
-						username = parsed1.username,
-						password = parsed1.password,
-						address = parsed1.host,
-						port = parsed1.port,
-						uot = "1",
-					}
-					local _outbound = gen_outbound(flag, _node, rule_name)
-					if _outbound then
-						table.insert(outbounds, _outbound)
-						rule_outboundTag = rule_name
+				elseif _node_id:find("Socks_") then
+					local socks_id = _node_id:sub(1 + #"Socks_")
+					local socks_node = uci:get_all(appname, socks_id) or nil
+					if socks_node then
+						local _node = {
+							type = "sing-box",
+							protocol = "socks",
+							address = "127.0.0.1",
+							port = socks_node.port,
+							uot = "1",
+						}
+						local _outbound = gen_outbound(flag, _node, rule_name)
+						if _outbound then
+							table.insert(outbounds, _outbound)
+							rule_outboundTag = rule_name
+						end
 					end
 				elseif _node_id ~= "nil" then
 					local _node = uci:get_all(appname, _node_id)
@@ -1157,6 +1161,7 @@ function gen_config(var)
 							geosite = {},
 						}
 						string.gsub(e.domain_list, '[^' .. "\r\n" .. ']+', function(w)
+							if w:find("#") == 1 then return end
 							if w:find("geosite:") == 1 then
 								table.insert(domain_table.geosite, w:sub(1 + #"geosite:"))
 							elseif w:find("regexp:") == 1 then
@@ -1164,8 +1169,7 @@ function gen_config(var)
 							elseif w:find("full:") == 1 then
 								table.insert(domain_table.domain, w:sub(1 + #"full:"))
 							elseif w:find("domain:") == 1 then
-								table.insert(domain_table.domain, w:sub(1 + #"domain:"))
-								table.insert(domain_table.domain_suffix, "." .. w:sub(1 + #"domain:"))
+								table.insert(domain_table.domain_suffix, w:sub(1 + #"domain:"))
 							else
 								table.insert(domain_table.domain_keyword, w)
 							end
@@ -1185,6 +1189,7 @@ function gen_config(var)
 						local ip_cidr = {}
 						local geoip = {}
 						string.gsub(e.ip_list, '[^' .. "\r\n" .. ']+', function(w)
+							if w:find("#") == 1 then return end
 							if w:find("geoip:") == 1 then
 								table.insert(geoip, w:sub(1 + #"geoip:"))
 							else
@@ -1293,7 +1298,7 @@ function gen_config(var)
 		if remote_dns_fake then
 			dns.fakeip = {
 				enabled = true,
-				inet4_range = "198.18.0.0/16",
+				inet4_range = "198.18.0.0/15",
 				inet6_range = "fc00::/18",
 			}
 			
@@ -1313,7 +1318,7 @@ function gen_config(var)
 			}
 		end
 	
-		if direct_dns_udp_server then
+		if direct_dns_udp_server or direct_dns_tcp_server or direct_dns_dot_server then
 			local domain = {}
 			local nodes_domain_text = sys.exec('uci show passwall | grep ".address=" | cut -d "\'" -f 2 | grep "[a-zA-Z]$" | sort -u')
 			string.gsub(nodes_domain_text, '[^' .. "\r\n" .. ']+', function(w)
@@ -1332,12 +1337,26 @@ function gen_config(var)
 			elseif direct_dns_query_strategy == "UseIPv6" then
 				direct_strategy = "ipv6_only"
 			end
-	
-			local port = tonumber(direct_dns_port) or 53
+
+			local direct_dns_server, port
+			if direct_dns_udp_server then
+				port = tonumber(direct_dns_port) or 53
+				direct_dns_server = "udp://" .. direct_dns_udp_server .. ":" .. port
+			elseif direct_dns_tcp_server then
+				port = tonumber(direct_dns_port) or 53
+				direct_dns_server = "tcp://" .. direct_dns_tcp_server .. ":" .. port
+			elseif direct_dns_dot_server then
+				port = tonumber(direct_dns_port) or 853
+				if direct_dns_dot_server:find(":") == nil then
+					direct_dns_server = "tls://" .. direct_dns_dot_server .. ":" .. port
+				else
+					direct_dns_server = "tls://[" .. direct_dns_dot_server .. "]:" .. port
+				end
+			end
 	
 			table.insert(dns.servers, {
 				tag = "direct",
-				address = "udp://" .. direct_dns_udp_server .. ":" .. port,
+				address = direct_dns_server,
 				address_strategy = "prefer_ipv6",
 				strategy = direct_strategy,
 				detour = "direct",
